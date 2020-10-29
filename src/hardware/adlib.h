@@ -117,6 +117,7 @@ struct Chip {
 typedef enum {
 	MODE_OPL2,
 	MODE_DUALOPL2,
+	MODE_DUALOPL2PAS,
 	MODE_OPL3,
 	MODE_OPL3GOLD
 } Mode;
@@ -166,6 +167,7 @@ class Module: public Module_base {
 	Bitu CtrlRead( void );
 public:
 	static OPL_Mode oplmode;
+	static bool pasFmMono;
 	MixerChannel* mixerChan;
 	Bit32u lastUsed;				//Ticks when adlib was last used to turn of mixing after a few second
 

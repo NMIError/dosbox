@@ -23,6 +23,9 @@
 #include <stdio.h>
 
 class Section;
+namespace Adlib {
+	class Module;
+}
 enum OPL_Mode {
 	OPL_none,OPL_cms,OPL_opl2,OPL_dualopl2,OPL_opl3,OPL_opl3gold
 };
@@ -34,7 +37,7 @@ enum OPL_Mode {
 
 extern Bitu CaptureState;
 
-void OPL_Init(Section* sec,OPL_Mode mode);
+Adlib::Module* OPL_Init(Section* sec,OPL_Mode mode);
 void CMS_Init(Section* sec);
 void OPL_ShutDown(Section* sec);
 void CMS_ShutDown(Section* sec);

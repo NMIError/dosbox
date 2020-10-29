@@ -232,6 +232,7 @@ void LOG_StartUp(void) {
 	loggrp[LOG_VGAMISC].front="VGAMISC";
 	loggrp[LOG_INT10].front="INT10";
 	loggrp[LOG_SB].front="SBLASTER";
+	loggrp[LOG_PAS].front = "PAS";
 	loggrp[LOG_DMACONTROL].front="DMA_CONTROL";
 	
 	loggrp[LOG_FPU].front="FPU";

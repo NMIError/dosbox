@@ -27,6 +27,7 @@
 #include "mapper.h"
 #include "mem.h"
 #include "dbopl.h"
+#include "support.h"
 
 #include "mame/emu.h"
 #include "mame/fmopl.h"
@@ -587,6 +588,17 @@ void Module::PortWrite( Bitu port, Bitu val, Bitu iolen ) {
 				DualWrite( 1, reg.dual[1], val );
 			}
 			break;
+		case MODE_DUALOPL2PAS:
+			if (port > 0x600 || pasFmMono) {
+				// 0x788 Dual FM port or mono flag set
+				//Write to both ports
+				DualWrite(0, reg.dual[0], val);
+				DualWrite(1, reg.dual[1], val);
+			} else {
+				Bit8u index = (port & 2) >> 1;
+				DualWrite(index, reg.dual[index], val);
+			}
+			break;
 		}
 	} else {
 		//Ask the handler to write the address
@@ -622,6 +634,16 @@ void Module::PortWrite( Bitu port, Bitu val, Bitu iolen ) {
 				reg.dual[1] = val & 0xff;
 			}
 			break;
+		case MODE_DUALOPL2PAS:
+			if (port > 0x600 || pasFmMono) {
+				// 0x788 Dual FM port or mono flag set
+				reg.dual[0] = val & 0xff;
+				reg.dual[1] = val & 0xff;
+			} else {
+				Bit8u index = (port & 2) >> 1;
+				reg.dual[index] = val & 0xff;
+			}
+			break;
 		}
 	}
 }
@@ -654,6 +676,7 @@ Bitu Module::PortRead( Bitu port, Bitu iolen ) {
 			return 0xff;
 		}
 	case MODE_DUALOPL2:
+	case MODE_DUALOPL2PAS:
 		//Only return for the lower ports
 		if ( port & 1 ) {
 			return 0xff;
@@ -673,6 +696,7 @@ void Module::Init( Mode m ) {
 	case MODE_OPL2:
 		break;
 	case MODE_DUALOPL2:
+	case MODE_DUALOPL2PAS:
 		//Setup opl3 mode in the hander
 		handler->WriteReg( 0x105, 1 );
 		//Also set it up in the cache so the capturing will start opl3
@@ -699,10 +723,13 @@ static void OPL_CallBack(Bitu len) {
 }
 
 static Bitu OPL_Read(Bitu port,Bitu iolen) {
-	return module->PortRead( port, iolen );
+	Bitu retVal = module->PortRead(port, iolen);
+	//LOG(LOG_PAS, LOG_NORMAL)("Read OPL port %4X value %4X", port, retVal);
+	return retVal;
 }
 
 void OPL_Write(Bitu port,Bitu val,Bitu iolen) {
+	//LOG(LOG_PAS, LOG_NORMAL)("Write OPL port %4X value %4X", port, val);
 	module->PortWrite( port, val, iolen );
 }
 
@@ -774,17 +801,19 @@ Module::Module( Section* configuration ) : Module_base(configuration) {
 	ctrl.index = 0;
 	ctrl.lvol = 0xff;
 	ctrl.rvol = 0xff;
+	pasFmMono = false;
 	handler = 0;
 	capture = 0;
 
+	bool pas = !strcasecmp(configuration->GetName(), "pas");
 	Section_prop * section=static_cast<Section_prop *>(configuration);
-	Bitu base = section->Get_hex("sbbase");
-	Bitu rate = section->Get_int("oplrate");
+	Bitu base = section->Get_hex(pas ? "pasbase" : "sbbase");
+	Bitu rate = section->Get_int(pas ? "pasoplrate" : "oplrate");
 	//Make sure we can't select lower than 8000 to prevent fixed point issues
 	if ( rate < 8000 )
 		rate = 8000;
-	std::string oplemu( section->Get_string( "oplemu" ) );
-	ctrl.mixer = section->Get_bool("sbmixer");
+	std::string oplemu( section->Get_string(pas ? "pasoplemu" : "oplemu" ) );
+	ctrl.mixer = section->Get_bool(pas ? "pasmixer" : "sbmixer");
 
 	mixerChan = mixerObject.Install(OPL_CallBack,rate,"FM");
 	//Used to be 2.0, which was measured to be too high. Exact value depends on card/clone.
@@ -817,7 +846,7 @@ Module::Module( Section* configuration ) : Module_base(configuration) {
 		Init( Adlib::MODE_OPL2 );
 		break;
 	case OPL_dualopl2:
-		Init( Adlib::MODE_DUALOPL2 );
+		Init( pas ? Adlib::MODE_DUALOPL2PAS : Adlib::MODE_DUALOPL2 );
 		break;
 	case OPL_opl3:
 		Init( Adlib::MODE_OPL3 );
@@ -826,17 +855,25 @@ Module::Module( Section* configuration ) : Module_base(configuration) {
 		Init( Adlib::MODE_OPL3GOLD );
 		break;
 	}
-	//0x388 range
-	WriteHandler[0].Install(0x388,OPL_Write,IO_MB, 4 );
-	ReadHandler[0].Install(0x388,OPL_Read,IO_MB, 4 );
-	//0x220 range
-	if ( !single ) {
-		WriteHandler[1].Install(base,OPL_Write,IO_MB, 4 );
-		ReadHandler[1].Install(base,OPL_Read,IO_MB, 4 );
+	if (pas) {
+		//0x388 range
+		WriteHandler[0].Install(base, OPL_Write, IO_MB, 4);
+		ReadHandler[0].Install(base, OPL_Read, IO_MB, 4);
+		//0x788 range
+		WriteHandler[1].Install(base + 0x400, OPL_Write, IO_MB, 2);
+		ReadHandler[1].Install(base + 0x400, OPL_Read, IO_MB, 1);
+	} else {
+		//0x388 range
+		WriteHandler[0].Install(0x388, OPL_Write, IO_MB, 4);
+		ReadHandler[0].Install(0x388, OPL_Read, IO_MB, 4);
+		if (!single) {
+			WriteHandler[1].Install(base, OPL_Write, IO_MB, 4);
+			ReadHandler[1].Install(base, OPL_Read, IO_MB, 4);
+		}
+		//0x228 range
+		WriteHandler[2].Install(base + 8, OPL_Write, IO_MB, 2);
+		ReadHandler[2].Install(base + 8, OPL_Read, IO_MB, 1);
 	}
-	//0x228 range
-	WriteHandler[2].Install(base+8,OPL_Write,IO_MB, 2);
-	ReadHandler[2].Install(base+8,OPL_Read,IO_MB, 1);
 
 	MAPPER_AddHandler(OPL_SaveRawEvent,MK_f7,MMOD1|MMOD2,"caprawopl","Cap OPL");
 }
@@ -852,13 +889,15 @@ Module::~Module() {
 
 //Initialize static members
 OPL_Mode Module::oplmode=OPL_none;
+bool Module::pasFmMono = false;
 
 };	//Adlib Namespace
 
 
-void OPL_Init(Section* sec,OPL_Mode oplmode) {
+Adlib::Module* OPL_Init(Section* sec,OPL_Mode oplmode) {
 	Adlib::Module::oplmode = oplmode;
 	module = new Adlib::Module( sec );
+	return module;
 }
 
 void OPL_ShutDown(Section* sec){

@@ -83,6 +83,7 @@ void KEYBOARD_Init(Section*);	//TODO This should setup INT 16 too but ok ;)
 void JOYSTICK_Init(Section*);
 void MOUSE_Init(Section*);
 void SBLASTER_Init(Section*);
+void PAS_Init(Section*);
 void GUS_Init(Section*);
 void MPU401_Init(Section*);
 void PCSPEAKER_Init(Section*);
@@ -619,6 +620,42 @@ void DOSBOX_Init(void) {
 	Pstring->Set_help("Provider for the OPL emulation. compat might provide better quality (see oplrate as well).");
 
 	Pint = secprop->Add_int("oplrate",Property::Changeable::WhenIdle,44100);
+	Pint->Set_values(oplrates);
+	Pint->Set_help("Sample rate of OPL music emulation. Use 49716 for highest quality (set the mixer rate accordingly).");
+
+	secprop = control->AddSection_prop("pas", &PAS_Init, true);
+
+	const char *pastypes[] = { "pas", "pas16", "none", 0 };
+	Pstring = secprop->Add_string("pastype", Property::Changeable::WhenIdle, "none");
+	Pstring->Set_values(pastypes);
+	Pstring->Set_help("Type of Pro Audio Spectrum to emulate.");
+
+	const char *pasios[] = { "388", "384", "38C", "288", 0 };
+	Phex = secprop->Add_hex("pasbase", Property::Changeable::WhenIdle, 0x338);
+	Phex->Set_values(pasios);
+	Phex->Set_help("The IO address of the Pro Audio Spectrum.");
+
+	Pint = secprop->Add_int("pasirq", Property::Changeable::WhenIdle, 7);
+	Pint->Set_values(irqssb);
+	Pint->Set_help("The IRQ number of the Pro Audio Spectrum.");
+
+	Pint = secprop->Add_int("pasdma", Property::Changeable::WhenIdle, 1);
+	Pint->Set_values(dmassb);
+	Pint->Set_help("The DMA number of the Pro Audio Spectrum.");
+
+	Pbool = secprop->Add_bool("pasmixer", Property::Changeable::WhenIdle, true);
+	Pbool->Set_help("Allow the Pro Audio Spectrum mixer to modify the DOSBox mixer.");
+
+	const char *pasoplmodes[] = { "auto", "dualopl2", "opl3", "none", 0 };
+	Pstring = secprop->Add_string("pasoplmode", Property::Changeable::WhenIdle, "auto");
+	Pstring->Set_values(pasoplmodes);
+	Pstring->Set_help("Type of OPL emulation. On 'auto' the mode is determined by PAS type. All OPL modes are Adlib-compatible.");
+
+	Pstring = secprop->Add_string("pasoplemu", Property::Changeable::WhenIdle, "default");
+	Pstring->Set_values(oplemus);
+	Pstring->Set_help("Provider for the OPL emulation. compat might provide better quality (see oplrate as well).");
+
+	Pint = secprop->Add_int("pasoplrate", Property::Changeable::WhenIdle, 44100);
 	Pint->Set_values(oplrates);
 	Pint->Set_help("Sample rate of OPL music emulation. Use 49716 for highest quality (set the mixer rate accordingly).");
 

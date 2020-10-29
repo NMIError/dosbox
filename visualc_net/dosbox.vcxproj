@@ -201,6 +201,7 @@
     <ClCompile Include="..\src\hardware\memory.cpp" />
     <ClCompile Include="..\src\hardware\mixer.cpp" />
     <ClCompile Include="..\src\hardware\mpu401.cpp" />
+    <ClCompile Include="..\src\hardware\pas.cpp" />
     <ClCompile Include="..\src\hardware\pci_bus.cpp" />
     <ClCompile Include="..\src\hardware\pcspeaker.cpp" />
     <ClCompile Include="..\src\hardware\pic.cpp" />
