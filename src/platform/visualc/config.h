@@ -20,6 +20,9 @@
 /* Define to 1 to enable IPX networking support, requires SDL_net */
 #define C_IPX 1
 
+/* Define to 1 to enable OPL2LPT support, requires libieee1284 */
+#define C_OPL2LPT 1
+
 /* Enable some heavy debugging options */
 #define C_HEAVY_DEBUG 0
 

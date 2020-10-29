@@ -71,7 +71,7 @@
       <CompileAs>Default</CompileAs>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>opengl32.lib;sdl_net.lib;winmm.lib;zlib.lib;libpng.lib;sdlmain.lib;sdl.lib;curses.lib;odbc32.lib;odbccp32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opengl32.lib;sdl_net.lib;winmm.lib;zlib.lib;libpng.lib;sdlmain.lib;sdl.lib;curses.lib;odbc32.lib;odbccp32.lib;ws2_32.lib;ieee1284.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>.\Debug/dosbox.exe</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -114,7 +114,7 @@
       <CompileAs>Default</CompileAs>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>opengl32.lib;winmm.lib;zlib.lib;libpng.lib;sdl_net.lib;sdlmain.lib;sdl.lib;curses.lib;odbc32.lib;odbccp32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opengl32.lib;winmm.lib;zlib.lib;libpng.lib;sdl_net.lib;sdlmain.lib;sdl.lib;curses.lib;odbc32.lib;odbccp32.lib;ws2_32.lib;ieee1284.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>.\Release/dosbox.exe</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -201,6 +201,7 @@
     <ClCompile Include="..\src\hardware\memory.cpp" />
     <ClCompile Include="..\src\hardware\mixer.cpp" />
     <ClCompile Include="..\src\hardware\mpu401.cpp" />
+    <ClCompile Include="..\src\hardware\opl2lpt.cpp" />
     <ClCompile Include="..\src\hardware\pci_bus.cpp" />
     <ClCompile Include="..\src\hardware\pcspeaker.cpp" />
     <ClCompile Include="..\src\hardware\pic.cpp" />
@@ -272,6 +273,7 @@
     <ClInclude Include="..\include\dos_system.h" />
     <ClInclude Include="..\include\fpu.h" />
     <ClInclude Include="..\include\hardware.h" />
+    <ClInclude Include="..\include\ieee1284.h" />
     <ClInclude Include="..\include\inout.h" />
     <ClInclude Include="..\include\joystick.h" />
     <ClInclude Include="..\include\keyboard.h" />
@@ -349,6 +351,7 @@
     <ClInclude Include="..\src\hardware\mame\sn76496.h" />
     <ClInclude Include="..\src\hardware\mame\ymdeltat.h" />
     <ClInclude Include="..\src\hardware\mame\ymf262.h" />
+    <ClInclude Include="..\src\hardware\opl2lpt.h" />
     <ClInclude Include="..\src\hardware\serialport\directserial.h" />
     <ClInclude Include="..\src\hardware\serialport\libserial.h" />
     <ClInclude Include="..\src\hardware\serialport\misc_util.h" />
