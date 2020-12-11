@@ -105,12 +105,13 @@ public:
 struct Chip {
 	//Last selected register
 	Timer timer0, timer1;
+	bool right;
 	//Check for it being a write to the timer
 	bool Write( Bit32u addr, Bit8u val );
 	//Read the current timer state, will use current double
 	Bit8u Read( );
 
-	Chip();
+	Chip(bool rightChip);
 };
 
 //The type of handler this is
@@ -119,7 +120,8 @@ typedef enum {
 	MODE_DUALOPL2,
 	MODE_DUALOPL2PAS,
 	MODE_OPL3,
-	MODE_OPL3GOLD
+	MODE_OPL3GOLD,
+	MODE_OPL3PAS
 } Mode;
 
 class Handler {
@@ -168,13 +170,14 @@ class Module: public Module_base {
 public:
 	static OPL_Mode oplmode;
 	static bool pasFmMono;
+	Adlib_OPLIRQHandler oplIrqHandler;
 	MixerChannel* mixerChan;
 	Bit32u lastUsed;				//Ticks when adlib was last used to turn of mixing after a few second
 
 	Handler* handler;				//Handler that will generate the sound
 	RegisterCache cache;
 	Capture* capture;
-	Chip	chip[2];
+	Chip	chip[2] = { Chip(false), Chip(true) };
 
 	//Handle port writes
 	void PortWrite( Bitu port, Bitu val, Bitu iolen );

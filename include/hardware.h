@@ -24,6 +24,7 @@
 
 class Section;
 namespace Adlib {
+	typedef void (*Adlib_OPLIRQHandler)(bool right);
 	class Module;
 }
 enum OPL_Mode {
@@ -37,7 +38,7 @@ enum OPL_Mode {
 
 extern Bitu CaptureState;
 
-Adlib::Module* OPL_Init(Section* sec,OPL_Mode mode);
+Adlib::Module* OPL_Init(Section* sec,OPL_Mode mode, Adlib::Adlib_OPLIRQHandler oplIrqHandler = 0);
 void CMS_Init(Section* sec);
 void OPL_ShutDown(Section* sec);
 void CMS_ShutDown(Section* sec);

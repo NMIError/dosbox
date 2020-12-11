@@ -106,6 +106,11 @@
 #define PAS16_IO_PRIMARY_CHIP_REVISION 0xFF88
 #define PAS16_IO_PRIMARY_READ 0xFF8B
 
+#define DMA_BUFSIZE 1024
+
+#define PAS_SH	14
+#define PAS_SH_MASK	((1 << PAS_SH)-1)
+
 enum PAS_TYPES { PAS_NONE, PAS_1, PAS_16 };
 enum PAS_FILTER_FREQS { 
 	PAS_FILTER_NONE, 
@@ -113,8 +118,27 @@ enum PAS_FILTER_FREQS {
 	PAS_FILTER_6KHZ, 
 	PAS_FILTER_9KHZ, 
 	PAS_FILTER_12KHZ, 
-	PAS_FILTER_16KHZ, // "15.909 kHz"; actually 14.909?
+	PAS_FILTER_16KHZ,
 	PAS_FILTER_18KHZ
+};
+enum PAS_DSP_BIT_DEPTH {
+	PAS_DSP_BIT_DEPTH_8,
+	PAS_DSP_BIT_DEPTH_12,
+	PAS_DSP_BIT_DEPTH_16
+};
+enum PAS_OVERSAMPLING {
+	PAS_OVERSAMPLING_0,
+	PAS_OVERSAMPLING_1,
+	PAS_OVERSAMPLING_2,
+	PAS_OVERSAMPLING_4
+};
+
+enum PAS_INTERRUPT_TYPES {
+	PAS_INTERRUPT_LEFT_FM,
+	PAS_INTERRUPT_RIGHT_FM,
+	PAS_INTERRUPT_SAMPLE_RATE_TIMER,
+	PAS_INTERRUPT_SAMPLE_BUFFER_COUNTER,
+	PAS_INTERRUPT_MIDI
 };
 
 struct PAS_INFO {
@@ -122,20 +146,40 @@ struct PAS_INFO {
 	bool enabled;
 	struct {
 		bool enabled;
+		bool active;
+		bool masked;
+
+		bool bit16;
+		Bitu rate, mul;
+		Bitu min;
+		union {
+			Bit8u  b8[DMA_BUFSIZE];
+			Bit16s b16[DMA_BUFSIZE];
+		} buf;
+		DmaChannel *chan;
+		Bitu remain_size;
 	} dma;
 	struct {
-		bool pending;
+		bool fm_left_pending;
+		bool fm_right_pending;
+		bool sample_timer_pending;
+		bool sample_buffer_pending;
+		bool midi_pending;
+
 		bool fm_left_enabled;
 		bool fm_right_enabled;
 		bool sample_timer_enabled;
 		bool sample_buffer_enabled;
 		bool midi_enabled;
-		Bit8u interrupt_control_upper_bits;
 	} irq;
 	struct {
 		bool enabled;
-		bool stereo;
+		bool mono;
 		bool dac;
+		PAS_DSP_BIT_DEPTH bit_depth;
+
+		bool right_active; // 0 if left channel or mono is active; 1 if right
+		bool sample_clipping; // 1 if recording has clipped
 
 		Bit8u wait_states;
 		Bit8u oversample_prescale;
@@ -147,18 +191,35 @@ struct PAS_INFO {
 	} hw;
 	struct {
 		bool enabled;
-		bool fmMono;
+
+		Bit8u mixer_control_last_write;
+
 		bool righttoright;
 		bool lefttoright;
 		bool righttoleft;
 		bool lefttoleft;
 		PAS_FILTER_FREQS filter_freq;
+		bool output; // true if the mixer should output audio; false if it is muted
 	} mixer;
 	struct {
 		bool sample_rate_enabled;
+		bool sample_rate_bcd_counting;
+		bool sample_rate_square_wave;
+		bool sample_rate_16_bit;
+		bool sample_rate_flipflop;
+		Bit16u sample_rate_interval; // interval between samples (1193180 / sample rate)
+
 		bool buffer_counter_enabled;
+		bool buffer_counter_bcd_counting;
+		bool buffer_counter_square_wave;
+		bool buffer_counter_16_bit;
+		bool buffer_counter_flipflop;
+		Bit16u buffer_counter_count; // number of samples? to count down
+
+		Bit16u buffer_counter_current;
 	} timer;
 	struct {
+		// System config 1
 		bool shadow;
 		bool pas1_pcm_emu;
 		bool clock_28mhz;
@@ -168,12 +229,20 @@ struct PAS_INFO {
 		bool sc1d6;
 		bool master_reset;
 
+		// System config 2
+		PAS_OVERSAMPLING oversampling;
+		bool msb_invert;
+		Bit8u secondary_port_bits;
+		bool vco_lock;
+
+		// System config 3
 		bool pcm_rate_28mhz;
 		bool sb_sample_rate_timer_1mhz;
 		bool invert_vco;
 		bool dac_invert_bclk;
 		bool left_right_sync_pulse;
 
+		// System config 4
 		bool cd_dma_active_high;
 		bool cd_dma_ack_active_high;
 		bool cd_irq_active_high;
@@ -193,16 +262,41 @@ struct PAS_INFO {
 	Adlib::Module *oplModule;
 };
 
-static Bit8u dma_to_ioconfig[] = { 4, 1, 2, 3, 0, 5, 6, 7 };
-static Bit8u irq_to_ioconfig[] = { 0, 0, 1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 9, 0, 10, 11 };
-static Bit8u ioconfig_to_irq[] = { 0xFF, 2, 3, 4, 5, 6, 7, 10, 11, 12, 14, 15 };
+static const Bit8u dma_to_ioconfig[] = { 4, 1, 2, 3, 0, 5, 6, 7 };
+static const Bit8u irq_to_ioconfig[] = { 0, 0, 1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 9, 0, 10, 11 };
+static const Bit8u ioconfig_to_irq[] = { 0xFF, 2, 3, 4, 5, 6, 7, 10, 11, 12, 14, 15 };
 
 static PAS_INFO pas;
 
+static void PAS_DSP_StartDMATransfer();
+static void PAS_DSP_GenerateDMASound(Bitu size);
+static void PAS_DSP_DMACallBack(DmaChannel *chan, DMAEvent event);
+static void PAS_DSP_EndDMATransfer();
+
+static Bitu correct_DMA_overrun(Bitu read);
+
 static void PAS_Reset() {
-	pas.enabled = false;
+	//pas.enabled = (pas.type != PAS_1); // Original PAS starts up disabled
+	pas.enabled = true;
 
 	pas.dma.enabled = false;
+	pas.dma.active = false;
+	pas.dma.masked = true;
+
+	pas.dma.bit16 = false;
+	pas.dma.rate = 0;
+	pas.dma.mul = 0;
+	pas.dma.min = 0;
+	memset(pas.dma.buf.b8, 0, sizeof(pas.dma.buf.b8));
+	memset(pas.dma.buf.b16, 0, sizeof(pas.dma.buf.b16));
+	pas.dma.chan = NULL;
+	pas.dma.remain_size = 0;
+
+	pas.irq.fm_left_pending = false;
+	pas.irq.fm_right_pending = false;
+	pas.irq.sample_timer_pending = false;
+	pas.irq.sample_buffer_pending = false;
+	pas.irq.midi_pending = false;
 
 	pas.irq.fm_left_enabled = false;
 	pas.irq.fm_right_enabled = false;
@@ -211,20 +305,38 @@ static void PAS_Reset() {
 	pas.irq.midi_enabled = false;
 
 	pas.dsp.enabled = false;
-	pas.dsp.stereo = false;
+	pas.dsp.mono = false;
 	pas.dsp.dac = false;
+	pas.dsp.bit_depth = PAS_DSP_BIT_DEPTH_8;
+
+	pas.dsp.right_active = false;
+	pas.dsp.sample_clipping = false;
+
 	pas.dsp.wait_states = 0;
 	pas.dsp.oversample_prescale = 0;
 
-	pas.mixer.fmMono = false;
+	pas.mixer.mixer_control_last_write = 0;
 	pas.mixer.righttoright = 0;
 	pas.mixer.lefttoright = 0;
 	pas.mixer.righttoleft = 0;
 	pas.mixer.lefttoleft = 0;
 	pas.mixer.filter_freq = PAS_FILTER_NONE;
+	pas.mixer.output = false;
 
 	pas.timer.sample_rate_enabled = false;
+	pas.timer.sample_rate_bcd_counting = false;
+	pas.timer.sample_rate_square_wave = false;
+	pas.timer.sample_rate_16_bit = false;
+	pas.timer.sample_rate_flipflop = false;
+	pas.timer.sample_rate_interval = 0;
+
 	pas.timer.buffer_counter_enabled = false;
+	pas.timer.buffer_counter_bcd_counting = false;
+	pas.timer.buffer_counter_square_wave = false;
+	pas.timer.buffer_counter_16_bit = false;
+	pas.timer.buffer_counter_flipflop = false;
+	pas.timer.buffer_counter_count = 0;
+	pas.timer.buffer_counter_current = 0;
 
 	pas.sysconfig.shadow = false;
 	pas.sysconfig.pas1_pcm_emu = false;
@@ -234,6 +346,11 @@ static void PAS_Reset() {
 	pas.sysconfig.real_sound = false;
 	pas.sysconfig.sc1d6 = false;
 	pas.sysconfig.master_reset = false;
+
+	pas.sysconfig.oversampling = PAS_OVERSAMPLING_0;
+	pas.sysconfig.msb_invert = false;
+	pas.sysconfig.secondary_port_bits = 0;
+	pas.sysconfig.vco_lock = false;
 
 	pas.sysconfig.pcm_rate_28mhz = false;
 	pas.sysconfig.sb_sample_rate_timer_1mhz = false;
@@ -254,6 +371,8 @@ static void PAS_Reset() {
 	pas.ioconfig.com_interrupt_pointer = 0;
 	pas.ioconfig.joystick_enabled = false;
 	pas.ioconfig.warm_boot_reset_enabled = false;
+
+	pas.chan->Enable(pas.enabled && pas.mixer.output);
 }
 
 static Bitu read_pas(Bitu port, Bitu /*iolen*/) {
@@ -263,11 +382,22 @@ static Bitu read_pas(Bitu port, Bitu /*iolen*/) {
 		// This register is write-only
 		return 0;
 
-	Bit16u standardizedPort = port + (pas.hw.base - 0x388);
+	Bit16u standardizedPort = port + (0x388 - pas.hw.base);
 	switch (standardizedPort) {
 	case PAS_IO_B2_AUDIO_MIXER_CONTROL:
-		retVal = 0;
+		retVal = pas.mixer.mixer_control_last_write;
 		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (audio mixer control) value %4X", port, retVal);
+		break;
+	case PAS_IO_B2_INTERRUPT_STATUS:
+		retVal = (pas.irq.fm_left_pending ? 1 : 0) |
+			(pas.irq.fm_right_pending << 1) |
+			(pas.irq.sample_timer_pending << 2) |
+			(pas.irq.sample_buffer_pending << 3) |
+			(pas.irq.midi_pending << 4) |
+			(pas.dsp.right_active << 5) |
+			(pas.enabled << 6) |
+			(pas.dsp.sample_clipping << 7);
+		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (interrupt status) value %4X", port, retVal);
 		break;
 	case PAS_IO_B2_AUDIO_FILTER_CONTROL:
 		switch (pas.mixer.filter_freq) {
@@ -293,7 +423,7 @@ static Bitu read_pas(Bitu port, Bitu /*iolen*/) {
 			retVal = 0x00;
 			break;
 		}
-		retVal |= (pas.enabled << 5) |
+		retVal |= (pas.mixer.output << 5) |
 			(pas.timer.sample_rate_enabled << 6) |
 			(pas.timer.buffer_counter_enabled << 7);
 		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (audio filter control) value %4X", port, retVal);
@@ -311,10 +441,21 @@ static Bitu read_pas(Bitu port, Bitu /*iolen*/) {
 			retVal |= 0x20;
 		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (interrupt control) value %4X", port, retVal);
 		break;
+	case PAS_IO_B3_CROSS_CHANNEL_CONTROL:
+		retVal = (pas.mixer.righttoright ? 1 : 0) |
+			(pas.mixer.lefttoright << 1) |
+			(pas.mixer.righttoleft << 2) |
+			(pas.mixer.lefttoleft << 3) |
+			(pas.dsp.dac << 4) |
+			(pas.dsp.mono << 5) |
+			(pas.dsp.enabled << 6) |
+			(pas.dma.enabled << 7);
+		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (cross channel control) value %4X", port, retVal);
+		break;
 	case PAS16_IO_SCSI_DETECT:
 		// Detection routines use this port to check for the presence 
-		// of an enhanced SCSI device. This is used to determine the 
-		// PAS model. The complete SCSI interface is not implemented.
+		// of an enhanced SCSI interface. This is used to determine the 
+		// PAS type. The complete SCSI interface is not implemented.
 		retVal = 0;
 		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (SCSI detect) value %4X", port, retVal);
 		break;
@@ -328,6 +469,37 @@ static Bitu read_pas(Bitu port, Bitu /*iolen*/) {
 			(pas.sysconfig.sc1d6 << 6) |
 			(pas.sysconfig.master_reset << 7);
 		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (system config 1) value %4X", port, retVal);
+		break;
+	case PAS16_IO_B7_SYSTEM_CONFIG_2:
+		switch (pas.sysconfig.oversampling) {
+		case PAS_OVERSAMPLING_0:
+			retVal = 0x0;
+			break;
+		case PAS_OVERSAMPLING_1:
+			retVal = 0x1;
+			break;
+		case PAS_OVERSAMPLING_2:
+			retVal = 0x2;
+			break;
+		case PAS_OVERSAMPLING_4:
+			retVal = 0x3;
+			break;
+		}
+		switch (pas.dsp.bit_depth) {
+		case PAS_DSP_BIT_DEPTH_8:
+			retVal |= (0x0 << 2);
+			break;
+		case PAS_DSP_BIT_DEPTH_12:
+			retVal |= (0x3 << 2);
+			break;
+		case PAS_DSP_BIT_DEPTH_16:
+			retVal |= (0x1 << 2);
+			break;
+		}
+		retVal |= (pas.sysconfig.msb_invert << 4) |
+			(pas.sysconfig.secondary_port_bits << 5) |
+			(pas.sysconfig.vco_lock << 7);
+		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (system config 2) value %4X", port, retVal);
 		break;
 	case PAS16_IO_B7_SYSTEM_CONFIG_3:
 		retVal = (pas.sysconfig.pcm_rate_28mhz ? 1 : 0) |
@@ -404,10 +576,15 @@ static Bitu read_pas(Bitu port, Bitu /*iolen*/) {
 		retVal = 0x0F;
 		LOG(LOG_PAS, LOG_NORMAL)("Read from PAS port %4X (secondary read) value %4X", port, retVal);
 		break;
-	case PAS_IO_B3_CROSS_CHANNEL_CONTROL:
+	case PAS_IO_B3_PCM_DATA:
+	case PAS_IO_B3_PCM_DATA_HIGH:
+	case PAS_IO_B4_SAMPLE_RATE_TIMER:
+	case PAS_IO_B4_SAMPLE_BUFFER_COUNT:
+	case PAS_IO_B4_LOCAL_SPEAKER_TIMER_COUNT:
+	case PAS_IO_B4_LOCAL_TIMER_CONTROL:
 		// Port is write-only
-		LOG(LOG_PAS, LOG_NORMAL)("Attempt to read from write-only PAS port %4X", port, retVal);
 		retVal = 0;
+		LOG(LOG_PAS, LOG_NORMAL)("Attempt to read from write-only PAS port %4X", port, retVal);
 		break;
 	default:
 		LOG(LOG_PAS, LOG_NORMAL)("Unhandled read from PAS port %4X", port);
@@ -422,11 +599,11 @@ static void write_pas(Bitu port, Bitu val, Bitu /*iolen*/) {
 			// This activates one of four installed PAS boards.
 			return;
 		if (val << 2 != pas.hw.base)
-			LOG_MSG("Attempt to activate PAS16 on I/O %4X while configured as %4X", val << 2, pas.hw.base);
+			LOG(LOG_PAS, LOG_WARN)("Attempt to activate PAS16 on I/O %4X while configured as %4X", val << 2, pas.hw.base);
 		return;
 	}
 
-	Bit16u standardizedPort = port + (pas.hw.base - 0x388);
+	Bit16u standardizedPort = port + (0x388 - pas.hw.base);
 	switch (standardizedPort) {
 	case PAS_IO_B2_AUDIO_MIXER_CONTROL:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (audio mixer control) value %4X", port, val);
@@ -446,6 +623,22 @@ static void write_pas(Bitu port, Bitu val, Bitu /*iolen*/) {
 				// MVA508 mixer reset
 			}
 		}
+		pas.mixer.mixer_control_last_write = val;
+		break;
+	case PAS_IO_B2_INTERRUPT_STATUS:
+		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (interrupt status) value %4X", port, val);
+		// A write to this registers clears any interrupts and brings the PAS out of reset.
+		pas.irq.fm_left_pending = false;
+		pas.irq.fm_right_pending = false;
+		pas.irq.sample_timer_pending = false;
+		pas.irq.sample_buffer_pending = false;
+		pas.irq.midi_pending = false;
+		if (pas.type == PAS_1 && !pas.enabled) {
+			pas.enabled = true;
+			pas.chan->Enable(pas.enabled && pas.mixer.output);
+		}
+		pas.dsp.sample_clipping = false;
+
 		break;
 	case PAS_IO_B2_AUDIO_FILTER_CONTROL:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (audio filter control) value %4X", port, val);
@@ -473,9 +666,36 @@ static void write_pas(Bitu port, Bitu val, Bitu /*iolen*/) {
 			pas.mixer.filter_freq = PAS_FILTER_NONE;
 			break;
 		}
-		pas.enabled = val & 0x20;
-		pas.timer.sample_rate_enabled = val & 0x40;
-		pas.timer.buffer_counter_enabled = val & 0x80;
+		bool output;
+		output = val & 0x20;
+		if (output != pas.mixer.output) {
+			pas.mixer.output = output;
+			pas.chan->Enable(pas.enabled && pas.mixer.output);
+		}
+
+		bool sampleBufferCounterEnabled;
+		sampleBufferCounterEnabled = val & 0x80;
+		if (sampleBufferCounterEnabled && !pas.timer.buffer_counter_enabled) {
+			pas.timer.buffer_counter_current = pas.timer.buffer_counter_count;
+			pas.timer.buffer_counter_enabled = true;
+		} else if (!sampleBufferCounterEnabled && pas.timer.buffer_counter_enabled) {
+			pas.timer.buffer_counter_enabled = false;
+		}
+
+		bool sampleRateTimerEnabled;
+		sampleRateTimerEnabled = val & 0x40;
+		if (sampleRateTimerEnabled && !pas.timer.sample_rate_enabled) {
+			// Start DMA transfer
+			pas.timer.sample_rate_enabled = true;
+			if (pas.irq.sample_timer_enabled)
+				LOG(LOG_PAS, LOG_WARN)("Sample timer enabled with interrupt (not implemented)!");
+			PAS_DSP_StartDMATransfer();
+		} else if (!sampleRateTimerEnabled && pas.timer.sample_rate_enabled) {
+			// Stop DMA transfer
+			PAS_DSP_EndDMATransfer();
+			pas.dma.active = false;
+			pas.timer.sample_rate_enabled = false;
+		}
 		break;
 	case PAS_IO_B2_INTERRUPT_CONTROL:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (interrupt control) value %4X", port, val);
@@ -492,9 +712,105 @@ static void write_pas(Bitu port, Bitu val, Bitu /*iolen*/) {
 		pas.mixer.righttoleft = val & 0x4;
 		pas.mixer.lefttoleft = val & 0x8;
 		pas.dsp.dac = val & 0x10;
-		pas.dsp.stereo = val & 0x20;
-		pas.dsp.enabled = val & 0x40;
-		pas.dma.enabled = val & 0x80;
+		pas.dsp.mono = val & 0x20;
+
+		bool dspEnabled;
+		dspEnabled = val & 0x40;
+
+		if (dspEnabled && !pas.dsp.enabled) {
+			pas.dsp.enabled = true;
+			PAS_DSP_StartDMATransfer();
+		} else if (!dspEnabled && pas.dsp.enabled) {
+			// Disable PCM
+			PAS_DSP_EndDMATransfer();
+			pas.dma.active = false;
+			pas.timer.sample_rate_enabled = false;
+			pas.timer.buffer_counter_enabled = false;
+			pas.dsp.enabled = false;
+		}
+
+		bool dmaEnabled;
+		dmaEnabled = val & 0x80;
+
+		if (dmaEnabled && !pas.dma.enabled) {
+			// Activate DMA
+			pas.dma.chan = GetDMAChannel(pas.hw.dma);
+			pas.dma.bit16 = (pas.dma.chan->DMA16 > 0);
+			pas.dma.enabled = true;
+			PAS_DSP_StartDMATransfer();
+		} else if (!dmaEnabled && pas.dma.enabled) {
+			// Deactivate DMA
+			PAS_DSP_EndDMATransfer();
+			pas.dma.chan->Register_Callback(NULL);
+			pas.dma.chan = NULL;
+			pas.dma.active = false;
+			pas.dma.enabled = false;
+		}
+
+		break;
+	case PAS_IO_B4_SAMPLE_RATE_TIMER:
+		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (sample rate timer) value %4X", port, val);
+		if (pas.timer.sample_rate_16_bit && pas.timer.sample_rate_flipflop) {
+			pas.timer.sample_rate_interval |= (val << 8);
+			pas.timer.sample_rate_flipflop = false;
+		} else {
+			pas.timer.sample_rate_interval = val;
+			if (pas.timer.sample_rate_16_bit)
+				pas.timer.sample_rate_flipflop = true;
+		}
+		break;
+	case PAS_IO_B4_SAMPLE_BUFFER_COUNT:
+		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (sample buffer count) value %4X", port, val);
+		if (pas.timer.buffer_counter_16_bit && pas.timer.buffer_counter_flipflop) {
+			pas.timer.buffer_counter_count |= (val << 8);
+			pas.timer.buffer_counter_flipflop = false;
+			pas.timer.buffer_counter_current = pas.timer.buffer_counter_count;
+		} else {
+			pas.timer.buffer_counter_count = val;
+			if (pas.timer.buffer_counter_16_bit) {
+				pas.timer.buffer_counter_flipflop = true;
+			} else {
+				pas.timer.buffer_counter_current = pas.timer.buffer_counter_count;
+			}
+		}
+		break;
+	case PAS_IO_B4_LOCAL_SPEAKER_TIMER_COUNT:
+		LOG(LOG_PAS, LOG_NORMAL)("Unhandled write to PAS port %4X (speaker timer count) value %4X", port, val);
+		break;
+	case PAS_IO_B4_LOCAL_TIMER_CONTROL:
+		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (local timer control) value %4X", port, val);
+		bool sampleBufferCounter;
+		switch ((val & 0xC0) >> 6) {
+		case 0x1:
+			sampleBufferCounter = true;
+			break;
+		case 0x0: // sample rate timer
+			sampleBufferCounter = false;
+			break;
+		case 0x2: // local speaker timer (not supported)
+		default:
+			LOG(LOG_PAS, LOG_WARN)("Attempt to set unsupported timer type %X", (val & 0xC0) >> 6);
+			return;
+		}
+		if (sampleBufferCounter) {
+			pas.timer.buffer_counter_bcd_counting = val & 0x1;
+			if (pas.timer.buffer_counter_bcd_counting)
+				LOG(LOG_PAS, LOG_WARN)("Attempt to use sample buffer counter with BCD counting (not implemented)");
+			pas.timer.buffer_counter_square_wave = (val & 0xE) >> 1 == 0x3;
+			if (pas.timer.buffer_counter_square_wave)
+				LOG(LOG_PAS, LOG_WARN)("Attempt to use sample buffer counter with square wave generator (not implemented)");
+			pas.timer.buffer_counter_16_bit = (val & 0x30) >> 4 == 0x3;
+			pas.timer.buffer_counter_flipflop = false;
+		} else {
+			pas.timer.sample_rate_bcd_counting = val & 0x1;
+			if (pas.timer.sample_rate_bcd_counting)
+				LOG(LOG_PAS, LOG_WARN)("Attempt to use sample rate timer with BCD counting (not implemented)");
+			pas.timer.sample_rate_square_wave = (val & 0xE) >> 1 == 0x3;
+			if (!pas.timer.sample_rate_square_wave)
+				LOG(LOG_PAS, LOG_WARN)("Attempt to use sample rate timer with rate generator (not implemented)");
+			pas.timer.sample_rate_16_bit = (val & 0x30) >> 4 == 0x3;
+			pas.timer.sample_rate_flipflop = false;
+		}
 		break;
 	case PAS16_IO_B7_SYSTEM_CONFIG_1:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (system config 1) value %4X", port, val);
@@ -506,6 +822,38 @@ static void write_pas(Bitu port, Bitu val, Bitu /*iolen*/) {
 		pas.sysconfig.real_sound = val & 0x20;
 		pas.sysconfig.sc1d6 = val & 0x40;
 		pas.sysconfig.master_reset = val & 0x80;
+		break;
+	case PAS16_IO_B7_SYSTEM_CONFIG_2:
+		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (system config 2) value %4X", port, val);
+		switch (val & 0x3) {
+		case 0x0:
+			pas.sysconfig.oversampling = PAS_OVERSAMPLING_0;
+			break;
+		case 0x1:
+			pas.sysconfig.oversampling = PAS_OVERSAMPLING_1;
+			break;
+		case 0x2:
+			pas.sysconfig.oversampling = PAS_OVERSAMPLING_2;
+			break;
+		case 0x3:
+			pas.sysconfig.oversampling = PAS_OVERSAMPLING_4;
+			break;
+		}
+		switch ((val & 0xC) >> 2) {
+		case 0x0:
+		case 0x2: // both 12 bit and 16 bit must be set for 12 bit audio
+			pas.dsp.bit_depth = PAS_DSP_BIT_DEPTH_8;
+			break;
+		case 0x1:
+			pas.dsp.bit_depth = PAS_DSP_BIT_DEPTH_16;
+			break;
+		case 0x3:
+			pas.dsp.bit_depth = PAS_DSP_BIT_DEPTH_12;
+			break;
+		}
+		pas.sysconfig.msb_invert = val & 0x10;
+		pas.sysconfig.secondary_port_bits = (val & 0x60) >> 5;
+		pas.sysconfig.vco_lock = val & 0x80;
 		break;
 	case PAS16_IO_B7_SYSTEM_CONFIG_3:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (system config 3) value %4X", port, val);
@@ -544,26 +892,26 @@ static void write_pas(Bitu port, Bitu val, Bitu /*iolen*/) {
 	case PAS16_IO_IO_CONFIG_2:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (I/O config 2) value %4X", port, val);
 		if (pas.hw.dma != dma_to_ioconfig[val & 0x7])
-			LOG_MSG("Attempt to set PAS16 DMA to %d while configured as %d", dma_to_ioconfig[val & 0x7], pas.hw.dma);
+			LOG(LOG_PAS, LOG_WARN)("Attempt to set PAS16 DMA to %d while configured as %d", dma_to_ioconfig[val & 0x7], pas.hw.dma);
 		break;
 	case PAS16_IO_IO_CONFIG_3:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (I/O config 3) value %4X", port, val);
 		if (pas.hw.irq != ioconfig_to_irq[val & 0xF])
-			LOG_MSG("Attempt to set PAS16 IRQ to %d while configured as %d", ioconfig_to_irq[val & 0xF], pas.hw.irq);
+			LOG(LOG_PAS, LOG_WARN)("Attempt to set PAS16 IRQ to %d while configured as %d", ioconfig_to_irq[val & 0xF], pas.hw.irq);
 		break;
 	case PAS16_IO_COMPATIBILITY_REGISTER_ENABLE:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (compatibility register enable) value %4X", port, val);
 		if (val & 0x1)
-			LOG_MSG("Attempt to enable PAS16 MPU-401 emulation");
+			LOG(LOG_PAS, LOG_WARN)("Attempt to enable PAS16 MPU-401 emulation");
 		if (val & 0x2)
-			LOG_MSG("Attempt to enable PAS16 SoundBlaster emulation");
+			LOG(LOG_PAS, LOG_WARN)("Attempt to enable PAS16 SoundBlaster emulation");
 		break;
 	case PAS16_IO_EMULATION_ADDRESS_POINTER:
 		LOG(LOG_PAS, LOG_NORMAL)("Write to PAS port %4X (emulation address pointer) value %4X", port, val);
 		if (val & 0xF)
-			LOG_MSG("Attempt to set PAS16 SoundBlaster emulation address pointer to %1X", val);
+			LOG(LOG_PAS, LOG_WARN)("Attempt to set PAS16 SoundBlaster emulation address pointer to %1X", val);
 		if (val & 0xF0)
-			LOG_MSG("Attempt to set PAS16 MPU-401 emulation address pointer to %1X", val >> 4);
+			LOG(LOG_PAS, LOG_WARN)("Attempt to set PAS16 MPU-401 emulation address pointer to %1X", val >> 4);
 		break;
 	default:
 		LOG(LOG_PAS, LOG_NORMAL)("Unhandled write to PAS port %4X value %4X", port, val);
@@ -571,8 +919,255 @@ static void write_pas(Bitu port, Bitu val, Bitu /*iolen*/) {
 	}
 }
 
+static INLINE void PAS_RaiseIRQ(PAS_INTERRUPT_TYPES interruptType) {
+	bool raiseIrq = true;
+	switch (interruptType) {
+	case PAS_INTERRUPT_LEFT_FM:
+		raiseIrq = (pas.irq.fm_left_enabled && !pas.irq.fm_left_pending);
+		if (raiseIrq) {
+			LOG(LOG_PAS, LOG_NORMAL)("Raising FM left IRQ");
+			pas.irq.fm_left_pending = true;
+		}
+		break;
+	case PAS_INTERRUPT_RIGHT_FM:
+		raiseIrq = (pas.irq.fm_right_enabled && !pas.irq.fm_right_pending);
+		if (raiseIrq) {
+			LOG(LOG_PAS, LOG_NORMAL)("Raising FM right IRQ");
+			pas.irq.fm_right_pending = true;
+		}
+		break;
+	case PAS_INTERRUPT_SAMPLE_RATE_TIMER:
+		raiseIrq = (pas.irq.sample_timer_enabled && !pas.irq.sample_timer_pending);
+		if (raiseIrq) {
+			LOG(LOG_PAS, LOG_NORMAL)("Raising sample rate timer IRQ");
+			pas.irq.sample_timer_pending = true;
+		}
+		break;
+	case PAS_INTERRUPT_SAMPLE_BUFFER_COUNTER:
+		raiseIrq = (pas.irq.sample_buffer_enabled && !pas.irq.sample_buffer_pending);
+		if (raiseIrq) {
+			LOG(LOG_PAS, LOG_NORMAL)("Raising sample buffer counter IRQ");
+			pas.irq.sample_buffer_pending = true;
+		}
+		break;
+	case PAS_INTERRUPT_MIDI:
+		raiseIrq = (pas.irq.midi_enabled && !pas.irq.midi_pending);
+		if (raiseIrq) {
+			LOG(LOG_PAS, LOG_NORMAL)("Raising MIDI IRQ");
+			pas.irq.midi_pending = true;
+		}
+		break;
+	}
+	if (raiseIrq) {
+		PIC_ActivateIRQ(pas.hw.irq);
+	} else {
+		LOG(LOG_PAS, LOG_NORMAL)("Not raising requested IRQ type %d", interruptType);
+	}
+}
+
+static void PAS_DSP_StartDMATransfer() {
+	if (!pas.dsp.enabled || !pas.timer.sample_rate_enabled || 
+		!pas.dma.enabled || pas.dma.active)
+		return;
+
+	pas.chan->FillUp();
+
+	switch (pas.dsp.bit_depth) {
+	case PAS_DSP_BIT_DEPTH_8:
+		pas.dma.mul = (1 << PAS_SH);
+		break;
+	case PAS_DSP_BIT_DEPTH_12:
+		LOG(LOG_PAS, LOG_WARN)("Attempt to start DMA transfer with 12 bit audio (not implemented)");
+		pas.dma.mul = (1 << PAS_SH) + (1 << (PAS_SH - 1)); // * 1.5
+		break;
+	case PAS_DSP_BIT_DEPTH_16:
+		pas.dma.mul = (1 << PAS_SH) * 2;
+		break;
+	}
+
+	// Interval for stereo is set to half the mono interval,
+	// so the calculated frequency is double the actual frequency.
+	Bitu freq = 1193180 / (pas.timer.sample_rate_interval * (!pas.dsp.mono ? 2 : 1));
+	if (!pas.dsp.mono) {
+		pas.dma.mul *= 2;
+	}
+	pas.dma.rate = (freq * pas.dma.mul) >> PAS_SH;
+	pas.dma.min = (pas.dma.rate * 3) / 1000;
+	pas.dma.remain_size = 0;
+	pas.chan->SetFreq(freq);
+
+	pas.dma.chan->Register_Callback(PAS_DSP_DMACallBack);
+
+	pas.dma.active = true;
+
+	if (pas.timer.buffer_counter_enabled && (pas.timer.buffer_counter_count < pas.dma.min)) {
+		float delay = (pas.timer.buffer_counter_count * 1000.0f) / pas.dma.rate;
+		LOG(LOG_PAS, LOG_NORMAL)("Short transfer scheduling IRQ in %.3f milliseconds", delay);
+		PIC_AddEvent(PAS_DSP_GenerateDMASound, delay, pas.timer.buffer_counter_count);
+	}
+
+	LOG(LOG_PAS, LOG_NORMAL)("Started DMA transfer. autoinit: %d, frequency: %d, bitdepth: %d, stereo: %d", 
+		pas.dma.chan->autoinit ? 1 : 0, freq, pas.dsp.bit_depth, pas.dsp.mono ? 0 : 1);
+}
+
+static double pas_last_dma_callback = 0.0f;
+
+static void PAS_DSP_DMACallBack(DmaChannel *chan, DMAEvent event) {
+	if (chan != pas.dma.chan) return;
+	switch (event) {
+	case DMA_MASKED:
+		LOG(LOG_PAS, LOG_NORMAL)("DMA masked, stopping output, left %d", chan->currcnt);
+		PAS_DSP_EndDMATransfer();
+		pas.dma.masked = true;
+		break;
+	case DMA_UNMASKED:
+		LOG(LOG_PAS, LOG_NORMAL)("DMA unmasked");
+		pas.dma.masked = false;
+		break;
+	case DMA_REACHED_TC:
+		// No need to do anything.
+		break;
+	default:
+		E_Exit("Unknown pas dma event");
+	}
+}
+
+static void PAS_DSP_EndDMATransfer() {
+	if (pas.timer.sample_rate_enabled && pas.dsp.enabled && 
+		pas.dma.enabled && pas.dma.active && !pas.dma.masked) {
+		double t = PIC_FullIndex() - pas_last_dma_callback;
+		LOG(LOG_PAS, LOG_NORMAL)("PAS_DSP_EndDMATransfer: time passed since last DMA callback: %f", t);
+		Bitu s = static_cast<Bitu>(pas.dma.rate * t / 1000.0f);
+		if (s > pas.dma.min) {
+			LOG(LOG_PAS, LOG_NORMAL)("PAS_DSP_EndDMATransfer: limiting DMA end amount to pas.dma.min");
+			s = pas.dma.min;
+		}
+		if (s) {
+			LOG(LOG_PAS, LOG_NORMAL)("PAS_DSP_EndDMATransfer: generating %d bytes", s);
+			PAS_DSP_GenerateDMASound(s);
+		}
+	}
+}
+
+static void PAS_DSP_GenerateDMASound(Bitu size) {
+	Bitu read = 0; Bitu done = 0; Bitu i = 0;
+	pas_last_dma_callback = PIC_FullIndex();
+
+	//Determine how much you should read
+	if (pas.dma.masked || pas.dma.chan->autoinit) {
+		if (pas.timer.buffer_counter_enabled && (pas.timer.buffer_counter_current < size)) {
+			LOG(LOG_PAS, LOG_NORMAL)("Limiting generated sound to buffer counter value %d", pas.timer.buffer_counter_current);
+			size = pas.timer.buffer_counter_current;
+		}
+	} else {
+		if (pas.timer.buffer_counter_enabled && (pas.timer.buffer_counter_current < pas.dma.min)) {
+			LOG(LOG_PAS, LOG_NORMAL)("Setting generated sound to current buffer counter value %d (below min value)", pas.timer.buffer_counter_current);
+			size = pas.timer.buffer_counter_current;
+		}
+	}
+
+	if (pas.dma.masked) {
+		pas.chan->AddSilence();
+		read = size;
+	} else {
+		//Read the actual data, process it and send it off to the mixer
+		if (pas.dsp.bit_depth == PAS_DSP_BIT_DEPTH_8) {
+			if (!pas.dsp.mono) {
+				read = pas.dma.chan->Read(size, &pas.dma.buf.b8[pas.dma.remain_size]);
+				if (read != size) {
+					LOG(LOG_PAS, LOG_NORMAL)("Requested %d DMA bytes, got %d", size, read);
+				}
+				Bitu used = correct_DMA_overrun(read);
+				Bitu total = used * (pas.dma.bit16 ? 2 : 1) + pas.dma.remain_size;
+				pas.chan->AddSamples_s8(total >> 1, pas.dma.buf.b8);
+				if (total & 1) {
+					pas.dma.remain_size = 1;
+					pas.dma.buf.b8[0] = pas.dma.buf.b8[total - 1];
+				} else pas.dma.remain_size = 0;
+			} else {
+				read = pas.dma.chan->Read(size, pas.dma.buf.b8);
+				if (read != size) {
+					LOG(LOG_PAS, LOG_NORMAL)("Requested %d DMA bytes, got %d", size, read);
+				}
+				Bitu used = correct_DMA_overrun(read);
+				pas.chan->AddSamples_m8(used * (pas.dma.bit16 ? 2 : 1), pas.dma.buf.b8);
+			}
+		} else if (pas.dsp.bit_depth == PAS_DSP_BIT_DEPTH_12) {
+			// TODO Implement this
+			pas.chan->AddSilence();
+			read = size;
+		} else {
+			if (!pas.dsp.mono) {
+				read = pas.dma.chan->Read(size, (Bit8u *)&pas.dma.buf.b16[pas.dma.remain_size]);
+				if (read != size) {
+					LOG(LOG_PAS, LOG_NORMAL)("Requested %d DMA bytes, got %d", size, read);
+				}
+				Bitu used = correct_DMA_overrun(read);
+				Bitu total = used / (pas.dma.bit16 ? 1 : 2) + pas.dma.remain_size;
+#if defined(WORDS_BIGENDIAN)
+				pas.chan->AddSamples_s16_nonnative(total >> 1, pas.dma.buf.b16);
+#else
+				pas.chan->AddSamples_s16(total >> 1, (Bit16s *)pas.dma.buf.b16);
+#endif
+				if (total & 1) {
+					pas.dma.remain_size = 1;
+					pas.dma.buf.b16[0] = pas.dma.buf.b16[total - 1];
+				} else pas.dma.remain_size = 0;
+			} else {
+				read = pas.dma.chan->Read(size, (Bit8u *)pas.dma.buf.b16);
+				if (read != size) {
+					LOG(LOG_PAS, LOG_NORMAL)("Requested %d DMA bytes, got %d", size, read);
+				}
+				Bitu used = correct_DMA_overrun(read);
+#if defined(WORDS_BIGENDIAN)
+				pas.chan->AddSamples_m16_nonnative(used / (pas.dma.bit16 ? 1 : 2), pas.dma.buf.b16);
+#else
+				pas.chan->AddSamples_m16(used / (pas.dma.bit16 ? 1 : 2), (Bit16s *)pas.dma.buf.b16);
+#endif
+			}
+		}
+	}
+
+	//Check how many bytes were actually read
+	if (pas.timer.buffer_counter_enabled) {
+		pas.timer.buffer_counter_current -= 
+			((pas.timer.buffer_counter_current < read) ? pas.timer.buffer_counter_current : read);
+		if (pas.timer.buffer_counter_current == 0) {
+			PAS_RaiseIRQ(PAS_INTERRUPT_SAMPLE_BUFFER_COUNTER);
+			pas.timer.buffer_counter_current = pas.timer.buffer_counter_count;
+		}
+	}
+}
+
+static Bitu correct_DMA_overrun(Bitu read) {
+	if (pas.dma.masked) {
+		// Channel got masked due to the DMA buffer being empty. For some reason 
+		// it seems an extra "trash" byte is read in this case. These must be 
+		// removed, otherwise they will cause clicks in the audio. (PQ3)
+		// Possibly this is a Sierra sound driver bug, not a PAS issue...
+		if (read > 0) {
+			read--;
+		}
+		LOG(LOG_PAS, LOG_NORMAL)("DMA got masked; using only %d bytes", read);
+	}
+	return read;
+}
+
 static void PAS_CallBack(Bitu len) {
-	// TODO Implement this
+	if (pas.timer.sample_rate_enabled && pas.dsp.enabled && 
+		pas.dma.enabled && pas.dma.active) {
+		len *= pas.dma.mul;
+		if (len & PAS_SH_MASK) len += 1 << PAS_SH;
+		len >>= PAS_SH;
+		PAS_DSP_GenerateDMASound(len);
+	}
+	else {
+		pas.chan->AddSilence();
+	}
+}
+
+static void PAS_OPLIRQCallback(bool right) {
+	PAS_RaiseIRQ(right ? PAS_INTERRUPT_RIGHT_FM : PAS_INTERRUPT_LEFT_FM);
 }
 
 class PAS : public Module_base {
@@ -580,7 +1175,6 @@ private:
 	/* Data */
 	IO_ReadHandleObject ReadHandler[13];
 	IO_WriteHandleObject WriteHandler[13];
-	//AutoexecObject autoexecline;
 	MixerObject MixerChan;
 	OPL_Mode oplmode;
 
@@ -611,14 +1205,15 @@ public:
 		/* Else assume auto */
 		else {
 			switch (pas.type) {
-			case PAS_NONE:
-				oplmode = OPL_none;
-				break;
 			case PAS_1:
 				oplmode = OPL_dualopl2;
 				break;
 			case PAS_16:
 				oplmode = OPL_opl3;
+				break;
+			case PAS_NONE:
+			default:
+				oplmode = OPL_none;
 				break;
 			}
 		}
@@ -626,12 +1221,13 @@ public:
 		if (oplmode == OPL_none) {
 			//WriteHandler[0].Install(0x388, adlib_gusforward, IO_MB);
 		} else {
-			pas.oplModule = OPL_Init(section, oplmode);
+			pas.oplModule = OPL_Init(section, oplmode, &PAS_OPLIRQCallback);
 		}
 
 		if (pas.type == PAS_NONE) return;
 
 		pas.chan = MixerChan.Install(&PAS_CallBack, 22050, "PAS");
+		pas.dma.chan = NULL;
 
 		for (Bit8u i = 0; i < (pas.type == PAS_1 ? 3 : 11); i++) {
 			Bit16u port;
@@ -690,9 +1286,14 @@ public:
 	~PAS() {
 		if (oplmode != OPL_none)
 			OPL_ShutDown(m_configuration);
-		if (pas.type != PAS_NONE)
-			// TODO Shut this thing down
-			;
+		if (pas.type != PAS_NONE) {
+			PIC_DeActivateIRQ(pas.hw.irq);
+			PIC_RemoveEvents(PAS_DSP_GenerateDMASound);
+			if (pas.dma.chan) {
+				pas.dma.chan->Clear_Request();
+				pas.dma.chan->Register_Callback(NULL);
+			}
+		}
 	}
 };
 

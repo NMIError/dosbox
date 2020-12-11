@@ -169,6 +169,7 @@ struct Handler : public Adlib::Handler {
 
 #define RAW_SIZE 1024
 
+static Adlib::Module *module = 0;
 
 /*
 	Main Adlib implementation
@@ -431,7 +432,7 @@ skipWrite:
 Chip
 */
 
-Chip::Chip() : timer0(80), timer1(320) {
+Chip::Chip(bool rightChip) : timer0(80), timer1(320), right(rightChip) {
 }
 
 bool Chip::Write( Bit32u reg, Bit8u val ) {
@@ -487,6 +488,8 @@ Bit8u Chip::Read( ) {
 		ret |= 0x20;
 		ret |= 0x80;
 	}
+	if (ret & 0x80 && module->oplIrqHandler)
+		(*module->oplIrqHandler)(right);
 	return ret;
 }
 
@@ -589,13 +592,15 @@ void Module::PortWrite( Bitu port, Bitu val, Bitu iolen ) {
 			}
 			break;
 		case MODE_DUALOPL2PAS:
+			Bit8u index = (port & 2) >> 1;
+			// HACK: Turn off mono FM if the second OPL2 chip is accessed.
+			if (index == 1) pasFmMono = false;
 			if (port > 0x600 || pasFmMono) {
 				// 0x788 Dual FM port or mono flag set
 				//Write to both ports
 				DualWrite(0, reg.dual[0], val);
 				DualWrite(1, reg.dual[1], val);
 			} else {
-				Bit8u index = (port & 2) >> 1;
 				DualWrite(index, reg.dual[index], val);
 			}
 			break;
@@ -635,12 +640,14 @@ void Module::PortWrite( Bitu port, Bitu val, Bitu iolen ) {
 			}
 			break;
 		case MODE_DUALOPL2PAS:
+			Bit8u index = (port & 2) >> 1;
+			// HACK: Turn off mono FM if the second OPL2 chip is accessed.
+			if (index == 1) pasFmMono = false;
 			if (port > 0x600 || pasFmMono) {
 				// 0x788 Dual FM port or mono flag set
 				reg.dual[0] = val & 0xff;
 				reg.dual[1] = val & 0xff;
 			} else {
-				Bit8u index = (port & 2) >> 1;
 				reg.dual[index] = val & 0xff;
 			}
 			break;
@@ -709,8 +716,6 @@ void Module::Init( Mode m ) {
 
 
 
-static Adlib::Module* module = 0;
-
 static void OPL_CallBack(Bitu len) {
 	module->handler->Generate( module->mixerChan, len );
 	//Disable the sound generation after 30 seconds of silence
@@ -724,12 +729,12 @@ static void OPL_CallBack(Bitu len) {
 
 static Bitu OPL_Read(Bitu port,Bitu iolen) {
 	Bitu retVal = module->PortRead(port, iolen);
-	//LOG(LOG_PAS, LOG_NORMAL)("Read OPL port %4X value %4X", port, retVal);
+	LOG(LOG_PAS, LOG_NORMAL)("Read OPL port %4X value %4X", port, retVal);
 	return retVal;
 }
 
 void OPL_Write(Bitu port,Bitu val,Bitu iolen) {
-	//LOG(LOG_PAS, LOG_NORMAL)("Write OPL port %4X value %4X", port, val);
+	LOG(LOG_PAS, LOG_NORMAL)("Write OPL port %4X value %4X", port, val);
 	module->PortWrite( port, val, iolen );
 }
 
@@ -894,9 +899,10 @@ bool Module::pasFmMono = false;
 };	//Adlib Namespace
 
 
-Adlib::Module* OPL_Init(Section* sec,OPL_Mode oplmode) {
+Adlib::Module* OPL_Init(Section* sec,OPL_Mode oplmode,Adlib::Adlib_OPLIRQHandler oplIrqHandler) {
 	Adlib::Module::oplmode = oplmode;
 	module = new Adlib::Module( sec );
+	module->oplIrqHandler = oplIrqHandler;
 	return module;
 }
 

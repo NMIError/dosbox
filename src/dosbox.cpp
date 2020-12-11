@@ -630,7 +630,7 @@ void DOSBOX_Init(void) {
 	Pstring->Set_values(pastypes);
 	Pstring->Set_help("Type of Pro Audio Spectrum to emulate.");
 
-	const char *pasios[] = { "388", "384", "38C", "288", 0 };
+	const char *pasios[] = { "388", "384", "38C", "288", "284", "28C", 0 };
 	Phex = secprop->Add_hex("pasbase", Property::Changeable::WhenIdle, 0x338);
 	Phex->Set_values(pasios);
 	Phex->Set_help("The IO address of the Pro Audio Spectrum.");

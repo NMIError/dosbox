@@ -3,3 +3,4 @@ visualc_net/Backup/
 visualc_net/Debug/
 visualc_net/Release/
 visualc_net/*.user
+/visualc_net/capture
